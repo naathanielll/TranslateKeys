@@ -351,6 +351,7 @@ final class KeyCapView: UIView {
         face.layer.shadowOffset = CGSize(width: 0, height: 1)
         face.layer.shadowRadius = 0
         face.layer.shadowOpacity = 1
+        face.layer.shadowPath = UIBezierPath(roundedRect: bounds, cornerRadius: 8).cgPath
         addSubview(face)
 
         label.frame = bounds
@@ -406,21 +407,22 @@ final class KeyCapView: UIView {
 
 final class KeyPopupView: UIView {
     private let label = UILabel()
-    private var keyRect: CGRect = .zero   // the key's position inside this view
+    private let shape = CAShapeLayer()
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         isUserInteractionEnabled = false
         backgroundColor = .clear
-        isOpaque = false
-        layer.shadowColor = UIColor.black.cgColor
-        layer.shadowOpacity = 0.25
-        layer.shadowRadius = 3
-        layer.shadowOffset = CGSize(width: 0, height: 1)
+        shape.shadowColor = UIColor.black.cgColor
+        shape.shadowOpacity = 0.25
+        shape.shadowRadius = 3
+        shape.shadowOffset = CGSize(width: 0, height: 1)
+        layer.addSublayer(shape)
         label.textAlignment = .center
         label.font = .systemFont(ofSize: 40, weight: .regular)
         label.textColor = .label
         addSubview(label)
+        refreshColor()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -431,21 +433,28 @@ final class KeyPopupView: UIView {
         let totalHeight = bulgeHeight + keyFrame.height + 6
         var x = keyFrame.midX - bulgeWidth / 2
         x = min(max(x, container.minX + 1), container.maxX - bulgeWidth - 1)   // keep edge keys on screen
-        frame = CGRect(x: x, y: keyFrame.maxY - totalHeight, width: bulgeWidth, height: totalHeight)
-        keyRect = CGRect(x: keyFrame.minX - x, y: totalHeight - keyFrame.height,
-                         width: keyFrame.width, height: keyFrame.height)
+        let newFrame = CGRect(x: x, y: keyFrame.maxY - totalHeight, width: bulgeWidth, height: totalHeight)
+        let keyRect = CGRect(x: keyFrame.minX - x, y: totalHeight - keyFrame.height,
+                             width: keyFrame.width, height: keyFrame.height)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)          // no implicit animations, just snap into place
+        if frame != newFrame || shape.path == nil {
+            frame = newFrame
+            let path = Self.path(bounds: CGRect(origin: .zero, size: newFrame.size), key: keyRect)
+            shape.path = path
+            shape.shadowPath = path
+        }
         label.text = text
         label.frame = CGRect(x: 0, y: 2, width: bulgeWidth, height: bulgeHeight - 6)
         isHidden = false
-        setNeedsDisplay()
+        CATransaction.commit()
     }
 
-    override func draw(_ rect: CGRect) {
+    private static func path(bounds: CGRect, key stem: CGRect) -> CGPath {
         let r: CGFloat = 9
-        let bulge = CGRect(x: 0.5, y: 0.5, width: bounds.width - 1, height: keyRect.minY - 6)
-        let stem = keyRect
+        let bulge = CGRect(x: 0.5, y: 0.5, width: bounds.width - 1, height: stem.minY - 6)
         let path = UIBezierPath()
-        // Bulge (top) with a smooth neck down into the key-shaped stem
         path.move(to: CGPoint(x: bulge.minX + r, y: bulge.minY))
         path.addLine(to: CGPoint(x: bulge.maxX - r, y: bulge.minY))
         path.addQuadCurve(to: CGPoint(x: bulge.maxX, y: bulge.minY + r), controlPoint: CGPoint(x: bulge.maxX, y: bulge.minY))
@@ -464,12 +473,15 @@ final class KeyPopupView: UIView {
         path.addLine(to: CGPoint(x: bulge.minX, y: bulge.minY + r))
         path.addQuadCurve(to: CGPoint(x: bulge.minX + r, y: bulge.minY), controlPoint: CGPoint(x: bulge.minX, y: bulge.minY))
         path.close()
-        UIColor.keyLetter.setFill()
-        path.fill()
+        return path.cgPath
+    }
+
+    private func refreshColor() {
+        shape.fillColor = UIColor.keyLetter.resolvedColor(with: traitCollection).cgColor
     }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
         super.traitCollectionDidChange(previous)
-        setNeedsDisplay()
+        refreshColor()
     }
 }
