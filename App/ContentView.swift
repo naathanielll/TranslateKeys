@@ -12,15 +12,16 @@ struct ContentView: View {
     @State private var testCode = "es"
     @State private var testResult = ""
     @State private var testing = false
+    @State private var favorites: [String] = SharedStore.favorites
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Turn on the keyboard") {
-                    Text("1. Download the languages you want below.")
+                    Text("1. Star the languages you want on the keyboard and tap Download for each.")
                     Text("2. Settings → General → Keyboard → Keyboards → Add New Keyboard → TranslateKeys")
                     Text("3. Tap TranslateKeys there and turn on **Allow Full Access**.")
-                    Text("4. In any app, type your message, tap 🌐, pick a language, tap **Translate**.")
+                    Text("4. In any app, switch to TranslateKeys with 🌐, type your message, pick a language and tap **Translate**.")
                     Button("Open Settings") {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
@@ -29,17 +30,32 @@ struct ContentView: View {
                 }
 
                 Section {
-                    ForEach(Languages.all.filter { $0.code != "en" }) { language in
-                        HStack {
+                    ForEach(Languages.all) { language in
+                        HStack(spacing: 12) {
+                            Button { toggleFavorite(language) } label: {
+                                Image(systemName: favorites.contains(language.code) ? "star.fill" : "star")
+                                    .foregroundStyle(favorites.contains(language.code) ? Color.yellow : Color.secondary)
+                                    .font(.title3)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel(favorites.contains(language.code)
+                                                ? "Remove \(language.name) from keyboard"
+                                                : "Show \(language.name) on keyboard")
                             Text(language.name)
                             Spacer()
-                            statusView(for: language)
+                            if language.code == "en" {
+                                Text("Built in").foregroundStyle(.secondary).font(.subheadline)
+                            } else {
+                                statusView(for: language)
+                            }
                         }
                     }
                 } header: {
-                    Text("Languages (free, works offline)")
+                    Text("Languages")
                 } footer: {
-                    Text("Each download pairs the language with English so you can translate both ways.")
+                    Text(SharedStore.isShared
+                         ? "Starred languages appear on the keyboard. Downloads are free and work offline."
+                         : "The keyboard couldn't connect to the app's settings, so it will show every language. Downloads are free and work offline.")
                 }
 
                 Section("Try it here") {
@@ -85,6 +101,16 @@ struct ContentView: View {
         default:
             ProgressView()
         }
+    }
+
+    private func toggleFavorite(_ language: TargetLanguage) {
+        if favorites.contains(language.code) {
+            guard favorites.count > 1 else { return }   // keep at least one language
+            favorites.removeAll { $0 == language.code }
+        } else {
+            favorites.append(language.code)
+        }
+        SharedStore.favorites = favorites
     }
 
     private func download(_ language: TargetLanguage) {
