@@ -8,25 +8,8 @@ Translation uses Apple's built-in, on-device translator: no account, no API key,
 
 ---
 
-## Part 1 — Let GitHub build the app for you (about 15 minutes)
 
-1. Unzip `TranslateKeys.zip` on your PC (right-click → Extract All).
-2. Go to **github.com** and create a free account (or sign in).
-3. Click **+** (top right) → **New repository**.
-   - Name: `TranslateKeys`
-   - Choose **Public** (unlimited free builds; there's nothing private in this code) — Private also works with a monthly free allowance.
-   - Click **Create repository**.
-4. On the new repo page, click **uploading an existing file**.
-5. Open the unzipped `TranslateKeys` folder. Select **everything inside it** (`.github`, `App`, `Keyboard`, `Shared`, `project.yml`, `README.md`) and drag it all onto the GitHub page. Wait for the files to finish uploading, then click **Commit changes**.
-   - Can't see the `.github` folder? In File Explorer: View → Show → Hidden items.
-6. Click the **Actions** tab. If it asks, click **I understand my workflows, go ahead and enable them**.
-   - You should see **Build TranslateKeys** running (yellow dot). If nothing is running: click **Build TranslateKeys** on the left → **Run workflow** → **Run workflow**.
-   - If there's no "Build TranslateKeys" at all, the `.github` folder didn't upload. Click **New workflow → set up a workflow yourself**, open `.github/workflows/build.yml` in Notepad, paste its contents, name the file `build.yml`, and commit.
-7. Wait about 5–10 minutes for a **green check**.
-   - **Red X?** Click it, click the failed step, copy the red error lines, and send them to Claude to fix.
-8. Click the finished run. Under **Artifacts**, download **TranslateKeys-ipa**. Unzip it — you'll get **TranslateKeys.ipa**. That's your app.
-
-## Part 2 — Install it on your iPhone with Sideloadly (about 15 minutes)
+## Part 1 — Install it on your iPhone with Sideloadly (about 15 minutes)
 
 9. **Install Apple's helpers on Windows.** Sideloadly needs these to talk to your iPhone:
    - **iTunes** and **iCloud** downloaded from **apple.com** (not the Microsoft Store versions — Sideloadly's site links the right ones).
@@ -42,7 +25,7 @@ Translation uses Apple's built-in, on-device translator: no account, no API key,
     - The option only appears after step 12.
 14. **Trust the app** (iPhone): Settings → General → **VPN & Device Management** → tap your Apple ID → **Trust**.
 
-## Part 3 — Turn on the keyboard (5 minutes)
+## Part 2 — Turn on the keyboard (5 minutes)
 
 15. Open the **TranslateKeys** app on your iPhone and tap **Download** next to each language you want. They download for free and work offline.
 16. Use the **Try it here** box to make sure translation works.
