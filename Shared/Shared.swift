@@ -54,9 +54,14 @@ enum Prefs {
         get { UserDefaults.standard.string(forKey: "lastTarget") ?? "es" }
         set { UserDefaults.standard.set(newValue, forKey: "lastTarget") }
     }
+    /// The language you usually type in, remembered so the translator can warm up early.
+    static var lastSource: String {
+        get { UserDefaults.standard.string(forKey: "lastSource") ?? "en" }
+        set { UserDefaults.standard.set(newValue, forKey: "lastSource") }
+    }
 }
 
-// MARK: - Favorites, shared between the app and the keyboard through an App Group
+// MARK: - Settings shared between the app and the keyboard through an App Group
 enum SharedStore {
     static let baseGroup = "group.com.nathanielortiz.translatekeys"
     static let defaultFavorites = ["es", "en", "fr", "ja", "ko", "zh-Hans"]
@@ -80,7 +85,12 @@ enum SharedStore {
     }()
 
     static var isShared: Bool { groupID != nil }
-    private static var defaults: UserDefaults? { groupID.flatMap { UserDefaults(suiteName: $0) } }
+
+    /// Shared with the app when the App Group works; otherwise this side's own storage,
+    /// so favorites picked with the keyboard's ★ button still stick.
+    private static var defaults: UserDefaults? {
+        groupID.flatMap { UserDefaults(suiteName: $0) } ?? .standard
+    }
 
     /// Language codes to show on the keyboard, in the order of Languages.all.
     static var favorites: [String] {
@@ -92,53 +102,128 @@ enum SharedStore {
         set { defaults?.set(newValue, forKey: "favorites") }
     }
 
+    /// Only the favorites, never the full list.
     static var favoriteLanguages: [TargetLanguage] {
-        // If the shared space isn't available, show every language rather than a stale list.
-        guard isShared else { return Languages.all }
         let codes = favorites
         return Languages.all.filter { codes.contains($0.code) }
     }
+
+    /// Shown in the app so problems with sharing can be diagnosed.
+    static var diagnostics: String {
+        let alt = (Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String])?.joined(separator: ", ") ?? "none"
+        return "App ID: \(Bundle.main.bundleIdentifier ?? "?")\nShared space: \(groupID ?? "not found")\nInstaller groups: \(alt)"
+    }
+
+    static var keySounds: Bool {
+        get { defaults?.object(forKey: "keySounds") as? Bool ?? true }
+        set { defaults?.set(newValue, forKey: "keySounds") }
+    }
+
+    static var haptics: Bool {
+        get { defaults?.object(forKey: "haptics") as? Bool ?? true }
+        set { defaults?.set(newValue, forKey: "haptics") }
+    }
 }
 
-// MARK: - Free on-device translation (Apple Translation framework)
-enum FreeTranslator {
-    /// Guess the language of the typed text.
+// MARK: - Free on-device translation (Apple Translation framework), kept warm for speed
+@MainActor
+final class TranslatorEngine {
+    static let shared = TranslatorEngine()
+
+    private var sessions: [String: TranslationSession] = [:]
+    private var installedPairs: Set<String> = []
+    private var warmUp: Task<Void, Never>?
+    private let availability = LanguageAvailability()
+
+    private func key(_ s: Locale.Language, _ t: Locale.Language) -> String {
+        s.minimalIdentifier + ">" + t.minimalIdentifier
+    }
+
+    /// One loaded translator per language pair. Only a couple are kept to stay within keyboard memory.
+    private func session(from source: Locale.Language, to target: Locale.Language) -> TranslationSession {
+        let k = key(source, target)
+        if let existing = sessions[k] { return existing }
+        if sessions.count >= 2 { sessions.removeAll() }
+        let made: TranslationSession
+        if #available(iOS 26.4, *) {
+            // The faster translation model; noticeably quicker on newer iPhones.
+            made = TranslationSession(installedSource: source, target: target, preferredStrategy: .lowLatency)
+        } else {
+            made = TranslationSession(installedSource: source, target: target)
+        }
+        sessions[k] = made
+        return made
+    }
+
+    private func isInstalled(_ source: Locale.Language, _ target: Locale.Language) async -> LanguageAvailability.Status {
+        let k = key(source, target)
+        if installedPairs.contains(k) { return .installed }
+        let status = await availability.status(from: source, to: target)
+        if status == .installed { installedPairs.insert(k) }
+        return status
+    }
+
+    /// Load the translator in the background before you tap Translate.
+    func prewarm(to target: TargetLanguage) {
+        let source = Locale.Language(identifier: Prefs.lastSource)
+        guard !Languages.sameLanguage(source, target.language) else { return }
+        warmUp?.cancel()
+        warmUp = Task {
+            guard await isInstalled(source, target.language) == .installed, !Task.isCancelled else { return }
+            let s = session(from: source, to: target.language)
+            _ = try? await s.translate("Hello")
+        }
+    }
+
+    func translate(_ text: String, to target: TargetLanguage) async throws -> String {
+        guard let source = Self.detectLanguage(of: text) else {
+            throw Self.fail("Couldn't tell what language this is. Type a few more words and try again.")
+        }
+        if Languages.sameLanguage(source, target.language) {
+            throw Self.fail("This already looks like \(target.name).")
+        }
+        Prefs.lastSource = source.minimalIdentifier
+
+        let sourceName = Languages.displayName(source)
+        switch await isInstalled(source, target.language) {
+        case .installed:
+            break
+        case .supported:
+            throw Self.fail("Download \(sourceName) and \(target.name) first: open the TranslateKeys app and tap Download.")
+        case .unsupported:
+            throw Self.fail("Apple can't translate \(sourceName) to \(target.name) yet.")
+        @unknown default:
+            break
+        }
+
+        await warmUp?.value          // don't run two translations on one session at once
+        let response = try await session(from: source, to: target.language).translate(text)
+        let output = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !output.isEmpty else { throw Self.fail("No translation came back. Try again.") }
+        return output
+    }
+
+    /// Guess the language of the typed text, limited to languages the translator supports.
     static func detectLanguage(of text: String) -> Locale.Language? {
         let recognizer = NLLanguageRecognizer()
+        recognizer.languageConstraints = Languages.all.map {
+            NLLanguage(rawValue: $0.code.hasPrefix("pt") ? "pt" : $0.code)
+        }
+        // Lean slightly toward the language you usually type in (helps with short messages).
+        recognizer.languageHints = [NLLanguage(rawValue: Prefs.lastSource): 0.4]
         recognizer.processString(text)
         guard let detected = recognizer.dominantLanguage, detected != .undetermined else { return nil }
         return Locale.Language(identifier: detected.rawValue)
     }
 
-    static func translate(_ text: String, to target: TargetLanguage) async throws -> String {
-        guard let source = detectLanguage(of: text) else {
-            throw fail("Couldn't tell what language this is. Type a few more words and try again.")
-        }
-        if Languages.sameLanguage(source, target.language) {
-            throw fail("This already looks like \(target.name).")
-        }
-
-        let sourceName = Languages.displayName(source)
-        let status = await LanguageAvailability().status(from: source, to: target.language)
-        switch status {
-        case .installed:
-            break
-        case .supported:
-            throw fail("Download \(sourceName) and \(target.name) first: open the TranslateKeys app and tap Download.")
-        case .unsupported:
-            throw fail("Apple can't translate \(sourceName) to \(target.name) yet.")
-        @unknown default:
-            break
-        }
-
-        let session = TranslationSession(installedSource: source, target: target.language)
-        let response = try await session.translate(text)
-        let output = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !output.isEmpty else { throw fail("No translation came back. Try again.") }
-        return output
-    }
-
     private static func fail(_ message: String) -> NSError {
         NSError(domain: "TranslateKeys", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+    }
+}
+
+/// Kept so the app's "Try it here" box uses the same fast engine.
+enum FreeTranslator {
+    static func translate(_ text: String, to target: TargetLanguage) async throws -> String {
+        try await TranslatorEngine.shared.translate(text, to: target)
     }
 }
