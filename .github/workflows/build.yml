@@ -1,0 +1,54 @@
+name: Build TranslateKeys
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Use the newest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Create the Xcode project
+        run: xcodegen generate
+
+      - name: Build the app (unsigned)
+        run: |
+          xcodebuild -version
+          xcodebuild \
+            -project TranslateKeys.xcodeproj \
+            -target TranslateKeys \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package as .ipa
+        run: |
+          APP="build/Release-iphoneos/TranslateKeys.app"
+          APPEX="$APP/PlugIns/TranslateKeysKeyboard.appex"
+          test -d "$APPEX" || { echo "Keyboard missing from app"; exit 1; }
+          # Give the keyboard and app a clean basic signature (keyboard first) so Sideloadly re-signs them correctly
+          codesign --force --sign - --timestamp=none "$APPEX"
+          codesign --force --sign - --timestamp=none "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry TranslateKeys.ipa Payload
+
+      - name: Upload the .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: TranslateKeys-ipa
+          path: TranslateKeys.ipa
