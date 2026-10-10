@@ -56,6 +56,50 @@ enum Prefs {
     }
 }
 
+// MARK: - Favorites, shared between the app and the keyboard through an App Group
+enum SharedStore {
+    static let baseGroup = "group.com.nathanielortiz.translatekeys"
+    static let defaultFavorites = ["es", "en", "fr", "ja", "ko", "zh-Hans"]
+
+    /// Installers like AltStore and Sideloadly rename App Groups (often adding a team ID),
+    /// so try the likely names and use the first one this app is actually allowed to open.
+    static let groupID: String? = {
+        var candidates: [String] = []
+        if let altGroups = Bundle.main.object(forInfoDictionaryKey: "ALTAppGroups") as? [String] {
+            candidates += altGroups
+        }
+        candidates.append(baseGroup)
+        let known: Set<String> = ["com", "nathanielortiz", "translatekeys", "keyboard"]
+        let extras = (Bundle.main.bundleIdentifier ?? "").split(separator: ".").map(String.init)
+            .filter { !known.contains($0) }
+        for extra in extras { candidates.append(baseGroup + "." + extra) }
+
+        return candidates.first {
+            FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: $0) != nil
+        }
+    }()
+
+    static var isShared: Bool { groupID != nil }
+    private static var defaults: UserDefaults? { groupID.flatMap { UserDefaults(suiteName: $0) } }
+
+    /// Language codes to show on the keyboard, in the order of Languages.all.
+    static var favorites: [String] {
+        get {
+            let saved = defaults?.stringArray(forKey: "favorites") ?? defaultFavorites
+            let valid = Languages.all.map(\.code).filter { saved.contains($0) }
+            return valid.isEmpty ? defaultFavorites : valid
+        }
+        set { defaults?.set(newValue, forKey: "favorites") }
+    }
+
+    static var favoriteLanguages: [TargetLanguage] {
+        // If the shared space isn't available, show every language rather than a stale list.
+        guard isShared else { return Languages.all }
+        let codes = favorites
+        return Languages.all.filter { codes.contains($0.code) }
+    }
+}
+
 // MARK: - Free on-device translation (Apple Translation framework)
 enum FreeTranslator {
     /// Guess the language of the typed text.
