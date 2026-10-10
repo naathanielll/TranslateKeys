@@ -1,56 +1,24 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Key colors that match the system keyboard in light and dark mode
-private extension Color {
-    static let keyLetter = Color(UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(white: 0.42, alpha: 1) : .white })
-    static let keySpecial = Color(UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(white: 0.27, alpha: 1) : UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) })
-    static let keyShadow = Color(UIColor { $0.userInterfaceStyle == .dark
-        ? UIColor(white: 0, alpha: 0.5) : UIColor(red: 0.53, green: 0.54, blue: 0.56, alpha: 1) })
+// Colors that match Apple's keyboard in light and dark mode.
+extension UIColor {
+    static let keyLetter = UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(white: 0.42, alpha: 1) : .white }
+    static let keySpecial = UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(white: 0.27, alpha: 1) : UIColor(red: 0.68, green: 0.70, blue: 0.74, alpha: 1) }
+    static let keyShadow = UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(white: 0, alpha: 0.55) : UIColor(red: 0.53, green: 0.54, blue: 0.56, alpha: 1) }
+    static let keyboardBackdrop = UIColor { $0.userInterfaceStyle == .dark
+        ? UIColor(white: 0.17, alpha: 1) : UIColor(red: 0.82, green: 0.83, blue: 0.85, alpha: 1) }
 }
 
-struct KeyboardView: View {
+// MARK: - Top bar: favorite languages, ★ to edit them, undo, Translate
+
+struct TopBarView: View {
     @ObservedObject var model: KeyboardModel
 
-    private let spacing: CGFloat = 6
-    private let rowSpacing: CGFloat = 11
-    private let keyHeight: CGFloat = 43
-
     var body: some View {
-        VStack(spacing: 8) {
-            topBar
-                .frame(height: 38)
-            GeometryReader { geo in
-                let unit = (geo.size.width - spacing * 9) / 10
-                VStack(spacing: rowSpacing) {
-                    charRow(rows.0, width: unit)
-                    charRow(rows.1, width: unit)
-                    HStack(spacing: spacing) {
-                        leftModifierKey.frame(width: unit * 1.35)
-                        Spacer(minLength: 0)
-                        charRow(rows.2, width: model.layer == .letters ? unit : unit * 1.35)
-                        Spacer(minLength: 0)
-                        KeyButton(kind: .special, repeats: true, onPress: model.tap, action: model.deleteBackward) {
-                            Image(systemName: "delete.left").font(.system(size: 19))
-                        }
-                        .frame(width: unit * 1.35)
-                    }
-                    .frame(height: keyHeight)
-                    bottomRow(unit: unit)
-                }
-            }
-            .frame(height: keyHeight * 4 + rowSpacing * 3)
-        }
-        .padding(.horizontal, 3)
-        .padding(.top, 6)
-        .padding(.bottom, 4)
-    }
-
-    // MARK: Top bar: languages, status, undo, Translate
-
-    private var topBar: some View {
         HStack(spacing: 6) {
             if model.busy || !model.message.isEmpty {
                 HStack(spacing: 8) {
@@ -61,7 +29,7 @@ struct KeyboardView: View {
                         .minimumScaleFactor(0.85)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.leading, 6)
+                .padding(.leading, 8)
                 .contentShape(Rectangle())
                 .onTapGesture { model.dismissMessage() }
             } else {
@@ -74,13 +42,22 @@ struct KeyboardView: View {
                                     .font(.subheadline.weight(selected ? .semibold : .regular))
                                     .padding(.horizontal, 11)
                                     .padding(.vertical, 6)
-                                    .background(Capsule().fill(selected ? Color.accentColor : Color.keyLetter))
+                                    .background(Capsule().fill(selected ? Color.accentColor : Color(UIColor.keyLetter)))
                                     .foregroundStyle(selected ? Color.white : Color.primary)
                             }
                             .buttonStyle(.plain)
                         }
+                        Button { model.editingFavorites = true } label: {
+                            Image(systemName: "star")
+                                .font(.system(size: 14, weight: .semibold))
+                                .frame(width: 32, height: 30)
+                                .background(Capsule().fill(Color(UIColor.keySpecial)))
+                                .foregroundStyle(Color.primary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Choose languages")
                     }
-                    .padding(.horizontal, 3)
+                    .padding(.horizontal, 5)
                 }
             }
 
@@ -89,7 +66,7 @@ struct KeyboardView: View {
                     Image(systemName: "arrow.uturn.backward")
                         .font(.system(size: 15, weight: .semibold))
                         .frame(width: 38, height: 34)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.keySpecial))
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(UIColor.keySpecial)))
                         .foregroundStyle(Color.primary)
                 }
                 .buttonStyle(.plain)
@@ -110,147 +87,57 @@ struct KeyboardView: View {
             }
             .buttonStyle(.plain)
             .disabled(model.busy)
+            .padding(.trailing, 5)
         }
-    }
-
-    // MARK: Key rows
-
-    private var rows: ([String], [String], [String]) {
-        switch model.layer {
-        case .letters:
-            return ("qwertyuiop".map(String.init), "asdfghjkl".map(String.init), "zxcvbnm".map(String.init))
-        case .numbers:
-            return ("1234567890".map(String.init),
-                    ["-", "/", ":", ";", "(", ")", "$", "&", "@", "\""],
-                    [".", ",", "?", "!", "'"])
-        case .symbols:
-            return (["[", "]", "{", "}", "#", "%", "^", "*", "+", "="],
-                    ["_", "\\", "|", "~", "<", ">", "€", "£", "¥", "•"],
-                    [".", ",", "?", "!", "'"])
-        }
-    }
-
-    private func charRow(_ keys: [String], width: CGFloat) -> some View {
-        HStack(spacing: spacing) {
-            ForEach(Array(keys.enumerated()), id: \.offset) { _, key in
-                KeyButton(kind: .letter, onPress: model.tap, action: { model.type(key) }) {
-                    Text(label(for: key))
-                        .font(.system(size: model.layer == .letters ? 24 : 22))
-                }
-                .frame(width: width)
-            }
-        }
-        .frame(height: keyHeight)
-    }
-
-    private func label(for key: String) -> String {
-        model.layer == .letters && model.shift != .off ? key.uppercased() : key
-    }
-
-    @ViewBuilder
-    private var leftModifierKey: some View {
-        switch model.layer {
-        case .letters:
-            KeyButton(kind: model.shift == .off ? .special : .letter, onPress: model.tap, action: model.tapShift) {
-                Image(systemName: model.shift == .locked ? "capslock.fill"
-                      : model.shift == .once ? "shift.fill" : "shift")
-                    .font(.system(size: 19))
-            }
-        case .numbers:
-            KeyButton(kind: .special, onPress: model.tap, action: { model.layer = .symbols }) {
-                Text("#+=").font(.system(size: 16))
-            }
-        case .symbols:
-            KeyButton(kind: .special, onPress: model.tap, action: { model.layer = .numbers }) {
-                Text("123").font(.system(size: 16))
-            }
-        }
-    }
-
-    private func bottomRow(unit: CGFloat) -> some View {
-        HStack(spacing: spacing) {
-            KeyButton(kind: .special, onPress: model.tap, action: {
-                model.layer = model.layer == .letters ? .numbers : .letters
-            }) {
-                Text(model.layer == .letters ? "123" : "ABC").font(.system(size: 16))
-            }
-            .frame(width: unit * 1.3)
-
-            if model.showGlobe {
-                KeyButton(kind: .special, onPress: model.tap, action: model.nextKeyboard) {
-                    Image(systemName: "globe").font(.system(size: 18))
-                }
-                .frame(width: unit * 1.1)
-            }
-
-            KeyButton(kind: .letter, onPress: model.tap, action: model.space) {
-                Text("space").font(.system(size: 16))
-            }
-
-            KeyButton(kind: .special, onPress: model.tap, action: model.newline) {
-                Text("return").font(.system(size: 16))
-            }
-            .frame(width: unit * 2.1)
-        }
-        .frame(height: keyHeight)
+        .frame(maxHeight: .infinity)
     }
 }
 
-// MARK: - A single key with a press state (and auto-repeat for delete)
+// MARK: - Pick which languages appear on the keyboard (opened with ★)
 
-struct KeyButton<Label: View>: View {
-    enum Kind { case letter, special }
-
-    var kind: Kind
-    var repeats = false
-    var onPress: () -> Void = {}
-    var action: () -> Void
-    @ViewBuilder var label: () -> Label
-
-    @State private var pressed = false
-    @State private var repeatTimer: Timer?
+struct FavoritesEditorView: View {
+    @ObservedObject var model: KeyboardModel
+    private let columns = [GridItem(.adaptive(minimum: 104), spacing: 6)]
 
     var body: some View {
-        label()
-            .foregroundStyle(Color.primary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(fill)
-                    .shadow(color: .keyShadow, radius: 0, x: 0, y: 1)
-            )
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        guard !pressed else { return }
-                        pressed = true
-                        onPress()
-                        action()
-                        if repeats { startRepeating() }
-                    }
-                    .onEnded { _ in
-                        pressed = false
-                        repeatTimer?.invalidate()
-                        repeatTimer = nil
-                    }
-            )
-            .accessibilityAddTraits(.isButton)
-    }
+        VStack(spacing: 8) {
+            HStack {
+                Text("Languages on keyboard").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("Done") { model.editingFavorites = false }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .frame(height: 32)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor))
+                    .foregroundStyle(Color.white)
+                    .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
 
-    private var fill: Color {
-        switch kind {
-        case .letter: return pressed ? .keySpecial : .keyLetter
-        case .special: return pressed ? .keyLetter : .keySpecial
-        }
-    }
-
-    private func startRepeating() {
-        repeatTimer?.invalidate()
-        repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { _ in
-            repeatTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: true) { _ in
-                if pressed { action() }
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(Languages.all) { language in
+                        let on = model.languages.contains(language)
+                        Button { model.toggleFavorite(language) } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: on ? "star.fill" : "star")
+                                    .foregroundStyle(on ? Color.yellow : Color.secondary)
+                                Text(language.name).lineLimit(1).minimumScaleFactor(0.75)
+                            }
+                            .font(.footnote)
+                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(Color(on ? UIColor.keyLetter : UIColor.keySpecial)))
+                            .foregroundStyle(Color.primary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 8)
             }
         }
+        .background(Color(UIColor.keyboardBackdrop))
     }
 }
