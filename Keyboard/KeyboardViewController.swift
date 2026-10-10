@@ -127,6 +127,8 @@ final class KeyboardModel: ObservableObject {
     private var autocorrectOn = true
     private var currentWord = ""
     private var pendingCorrection: String?
+    private var pendingFor = ""
+    private var suggestionWork: DispatchWorkItem?
     private var skipCorrectionFor: String?
     private var lastCorrection: (original: String, corrected: String, separator: String)?
 
@@ -210,6 +212,7 @@ final class KeyboardModel: ObservableObject {
     func moveCursor(by offset: Int) {
         proxy?.adjustTextPosition(byCharacterOffset: offset)
         lastCorrection = nil
+        afterChange()
     }
 
     func tapShift() {
@@ -243,7 +246,10 @@ final class KeyboardModel: ObservableObject {
     private func finishWord(separator: String) {
         guard let proxy else { return }
         let word = currentWord
-        if autocorrectAllowed, let fix = pendingCorrection, !word.isEmpty, word != skipCorrectionFor {
+        // Use the already-computed fix if it's for this word; otherwise check now.
+        let fix: String? = word.isEmpty || word == skipCorrectionFor || !autocorrectAllowed ? nil
+            : (pendingFor == word ? pendingCorrection : speller.correctionNow(for: word))
+        if let fix {
             for _ in 0..<word.count { proxy.deleteBackward() }
             proxy.insertText(fix + separator)
             lastCorrection = (word, fix, separator)
@@ -284,22 +290,37 @@ final class KeyboardModel: ObservableObject {
         }
         currentWord = String(chars.reversed())
 
-        var items: [SuggestionItem] = []
-        if autocorrectAllowed, !currentWord.isEmpty {
-            let fix = currentWord == skipCorrectionFor ? nil : speller.correction(for: currentWord)
-            pendingCorrection = fix
-            let others = speller.alternatives(for: currentWord, excluding: fix)
+        // Spell-check in the background, only once you pause briefly, so fast typing never waits.
+        suggestionWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.updateSuggestions() }
+        suggestionWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.09, execute: work)
+    }
+
+    private func updateSuggestions() {
+        let word = currentWord
+        guard autocorrectAllowed, !word.isEmpty else {
+            pendingCorrection = nil
+            pendingFor = ""
+            if !suggestions.isEmpty { suggestions = [] }
+            return
+        }
+        let skip = word == skipCorrectionFor
+        speller.suggest(for: word) { [weak self] fix, others in
+            guard let self, self.currentWord == word else { return }   // you've typed more since
+            let fix = skip ? nil : fix
+            self.pendingCorrection = fix
+            self.pendingFor = word
+            var items: [SuggestionItem]
             if let fix {
-                items = [SuggestionItem(text: "“\(currentWord)”", role: .keep),
+                items = [SuggestionItem(text: "“\(word)”", role: .keep),
                          SuggestionItem(text: fix, role: .correction)]
                 items += others.prefix(1).map { SuggestionItem(text: $0, role: .completion) }
             } else {
                 items = others.map { SuggestionItem(text: $0, role: .completion) }
             }
-        } else {
-            pendingCorrection = nil
+            if items != self.suggestions { self.suggestions = items }
         }
-        if items != suggestions { suggestions = items }
     }
 
     /// Capitalize the first letter of a message or sentence.
