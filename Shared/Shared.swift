@@ -119,6 +119,11 @@ enum SharedStore {
         set { defaults?.set(newValue, forKey: "keySounds") }
     }
 
+    static var autocorrect: Bool {
+        get { defaults?.object(forKey: "autocorrect") as? Bool ?? true }
+        set { defaults?.set(newValue, forKey: "autocorrect") }
+    }
+
     static var haptics: Bool {
         get { defaults?.object(forKey: "haptics") as? Bool ?? true }
         set { defaults?.set(newValue, forKey: "haptics") }
@@ -222,6 +227,7 @@ final class TranslatorEngine {
 }
 
 /// Kept so the app's "Try it here" box uses the same fast engine.
+@MainActor
 enum FreeTranslator {
     static func translate(_ text: String, to target: TargetLanguage) async throws -> String {
         try await TranslatorEngine.shared.translate(text, to: target)
