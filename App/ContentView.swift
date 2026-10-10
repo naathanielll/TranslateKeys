@@ -13,6 +13,8 @@ struct ContentView: View {
     @State private var testResult = ""
     @State private var testing = false
     @State private var favorites: [String] = SharedStore.favorites
+    @State private var keySounds = SharedStore.keySounds
+    @State private var haptics = SharedStore.haptics
 
     var body: some View {
         NavigationStack {
@@ -53,9 +55,22 @@ struct ContentView: View {
                 } header: {
                     Text("Languages")
                 } footer: {
-                    Text(SharedStore.isShared
-                         ? "Starred languages appear on the keyboard. Downloads are free and work offline."
-                         : "The keyboard couldn't connect to the app's settings, so it will show every language. Downloads are free and work offline.")
+                    if SharedStore.isShared {
+                        Text("Starred languages appear on the keyboard. Downloads are free and work offline.")
+                    } else {
+                        Text("The keyboard can't read these stars on this install, so pick your languages with the ★ button on the keyboard itself. Downloads are free and work offline.\n\n\(SharedStore.diagnostics)")
+                    }
+                }
+
+                Section {
+                    Toggle("Key clicks", isOn: $keySounds)
+                        .onChange(of: keySounds) { _, on in SharedStore.keySounds = on }
+                    Toggle("Haptic feedback", isOn: $haptics)
+                        .onChange(of: haptics) { _, on in SharedStore.haptics = on }
+                } header: {
+                    Text("Keyboard feel")
+                } footer: {
+                    Text(SharedStore.isShared ? "" : "These apply once the keyboard can read the app's settings.")
                 }
 
                 Section("Try it here") {
