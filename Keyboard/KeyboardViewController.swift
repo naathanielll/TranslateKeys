@@ -5,7 +5,7 @@ import Combine
 final class KeyboardViewController: UIInputViewController {
     private let model = KeyboardModel()
     private var topBar: UIHostingController<TopBarView>!
-    private var editor: UIHostingController<FavoritesEditorView>!
+    private var picker: UIHostingController<LanguagePickerView>!
     private var keysView: KeysView!
     private var bag = Set<AnyCancellable>()
 
@@ -15,25 +15,27 @@ final class KeyboardViewController: UIInputViewController {
         model.proxyProvider = { [weak self] in self?.textDocumentProxy }
         model.nextKeyboard = { [weak self] in self?.advanceToNextInputMode() }
 
-        // Languages + Translate (SwiftUI)
+        // Language, suggestions, Translate (SwiftUI)
         topBar = UIHostingController(rootView: TopBarView(model: model))
         topBar.view.backgroundColor = .clear
         // Keys (UIKit, for low-latency typing)
         keysView = KeysView(model: model)
-        // Favorites picker shown over the keys when ★ is tapped
-        editor = UIHostingController(rootView: FavoritesEditorView(model: model))
-        editor.view.backgroundColor = .clear
-        editor.view.isHidden = true
+        // Language picker shown over the keys
+        picker = UIHostingController(rootView: LanguagePickerView(model: model))
+        picker.view.backgroundColor = .clear
+        picker.view.isHidden = true
 
-        for child in [topBar!, editor!] { addChild(child) }
-        for sub in [topBar.view!, keysView!, editor.view!] {
+        let children: [UIViewController] = [topBar, picker]
+        children.forEach { addChild($0) }
+        let subviews: [UIView] = [topBar.view, keysView, picker.view]
+        for sub in subviews {
             sub.translatesAutoresizingMaskIntoConstraints = false
             view.addSubview(sub)
         }
         topBar.didMove(toParent: self)
-        editor.didMove(toParent: self)
+        picker.didMove(toParent: self)
         view.bringSubviewToFront(keysView)      // key pop-ups draw over the top bar
-        view.bringSubviewToFront(editor.view)
+        view.bringSubviewToFront(picker.view)
 
         let height = view.heightAnchor.constraint(equalToConstant: KeysView.preferredHeight + 46)
         height.priority = UILayoutPriority(999)
@@ -48,22 +50,29 @@ final class KeyboardViewController: UIInputViewController {
             keysView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             keysView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            editor.view.topAnchor.constraint(equalTo: view.topAnchor),
-            editor.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            editor.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            editor.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            picker.view.topAnchor.constraint(equalTo: view.topAnchor),
+            picker.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            picker.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            picker.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             height
         ])
 
-        model.$editingFavorites
+        model.$pickingLanguage
             .receive(on: RunLoop.main)
-            .sink { [weak self] editing in self?.editor.view.isHidden = !editing }
+            .sink { [weak self] open in self?.picker.view.isHidden = !open }
             .store(in: &bag)
+
+        // Names from your contacts and text replacements, so autocorrect leaves them alone.
+        requestSupplementaryLexicon { [weak self] lexicon in
+            let entries = lexicon.entries
+            DispatchQueue.main.async { self?.model.speller.setLexicon(entries) }
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         model.hasFullAccess = hasFullAccess
+        model.reloadSettings()
         model.loadFavorites()
         model.refresh()
         keysView.reloadSettings()
@@ -85,21 +94,41 @@ final class KeyboardViewController: UIInputViewController {
 enum KeyLayer { case letters, numbers, symbols }
 enum ShiftState { case off, once, locked }
 
+struct SuggestionItem: Identifiable, Equatable {
+    enum Role { case keep, correction, completion }
+    let text: String
+    let role: Role
+    var id: String { "\(role)-\(text)" }
+}
+
 @MainActor
 final class KeyboardModel: ObservableObject {
+    // Shown by the SwiftUI top bar. Only changes when something visible changes.
     @Published var targetCode: String = Prefs.lastTarget
     @Published var languages: [TargetLanguage] = SharedStore.favoriteLanguages
-    @Published var editingFavorites = false
+    @Published var pickingLanguage = false
     @Published var message = ""
     @Published var busy = false
     @Published var canUndo = false
-    @Published var layer: KeyLayer = .letters
-    @Published var shift: ShiftState = .once
-    @Published var showGlobe = false
-    var hasFullAccess = true
+    @Published var suggestions: [SuggestionItem] = []
 
+    // Typing state goes straight to the keys (no SwiftUI redraw on every keystroke).
+    var onLayoutChange: (() -> Void)?
+    var onShiftChange: (() -> Void)?
+    var layer: KeyLayer = .letters { didSet { if layer != oldValue { onLayoutChange?() } } }
+    var shift: ShiftState = .once { didSet { if shift != oldValue { onShiftChange?() } } }
+    var showGlobe = false { didSet { if showGlobe != oldValue { onLayoutChange?() } } }
+
+    var hasFullAccess = true
     var proxyProvider: () -> UITextDocumentProxy? = { nil }
     var nextKeyboard: () -> Void = {}
+
+    let speller = Speller()
+    private var autocorrectOn = true
+    private var currentWord = ""
+    private var pendingCorrection: String?
+    private var skipCorrectionFor: String?
+    private var lastCorrection: (original: String, corrected: String, separator: String)?
 
     private var task: Task<Void, Never>?
     private var messageTask: Task<Void, Never>?
@@ -111,15 +140,28 @@ final class KeyboardModel: ObservableObject {
     var target: TargetLanguage { Languages.find(targetCode) }
     private var proxy: UITextDocumentProxy? { proxyProvider() }
 
+    func reloadSettings() {
+        autocorrectOn = SharedStore.autocorrect
+        speller.setLanguage(fromCode: Prefs.lastSource)
+    }
+
+    private func clearUndo() { if canUndo { canUndo = false } }
+
     // MARK: Typing
 
     func type(_ key: String) {
+        guard let proxy else { return }
         let text = (layer == .letters && shift != .off) ? key.uppercased() : key
-        proxy?.insertText(text)
-        canUndo = false
+        if ".,?!;:".contains(key) {
+            finishWord(separator: text)        // autocorrect before punctuation
+        } else {
+            proxy.insertText(text)
+            lastCorrection = nil
+        }
+        clearUndo()
         // Like Apple's keyboard: after an apostrophe on the number pad, go back to letters
         if layer != .letters && key == "'" { layer = .letters }
-        updateAutoShift()
+        afterChange()
     }
 
     func space() {
@@ -131,29 +173,43 @@ final class KeyboardModel: ObservableObject {
            let previous = before.dropLast().last, previous.isLetter || previous.isNumber {
             proxy.deleteBackward()
             proxy.insertText(". ")
+            lastCorrection = nil
         } else {
-            proxy.insertText(" ")
+            finishWord(separator: " ")
         }
         lastSpaceTap = now
-        canUndo = false
+        clearUndo()
         if layer != .letters { layer = .letters }
-        updateAutoShift()
-    }
-
-    func deleteBackward() {
-        proxy?.deleteBackward()
-        canUndo = false
-        updateAutoShift()
+        afterChange()
     }
 
     func newline() {
-        proxy?.insertText("\n")
-        canUndo = false
-        updateAutoShift()
+        finishWord(separator: "\n")
+        clearUndo()
+        afterChange()
+    }
+
+    func deleteBackward() {
+        guard let proxy else { return }
+        // Delete right after an autocorrect puts your original word back (and remembers it).
+        if let fix = lastCorrection,
+           (proxy.documentContextBeforeInput ?? "").hasSuffix(fix.corrected + fix.separator) {
+            for _ in 0..<(fix.corrected.count + fix.separator.count) { proxy.deleteBackward() }
+            proxy.insertText(fix.original)
+            speller.learn(fix.original)
+            skipCorrectionFor = fix.original
+            lastCorrection = nil
+        } else {
+            proxy.deleteBackward()
+            lastCorrection = nil
+        }
+        clearUndo()
+        afterChange()
     }
 
     func moveCursor(by offset: Int) {
         proxy?.adjustTextPosition(byCharacterOffset: offset)
+        lastCorrection = nil
     }
 
     func tapShift() {
@@ -168,32 +224,104 @@ final class KeyboardModel: ObservableObject {
 
     func setLayer(_ newLayer: KeyLayer) {
         layer = newLayer
-        updateAutoShift()
+        afterChange()
     }
 
-    func refresh() { updateAutoShift() }
+    func refresh() { afterChange() }
+
+    // MARK: Autocorrect
+
+    private var autocorrectAllowed: Bool {
+        guard autocorrectOn, let proxy else { return false }
+        if proxy.autocorrectionType == UITextAutocorrectionType.no { return false }
+        let type = proxy.keyboardType ?? .default
+        return ![.URL, .emailAddress, .webSearch, .twitter, .asciiCapableNumberPad, .numberPad, .phonePad]
+            .contains(type)
+    }
+
+    /// End the current word: apply the pending correction, then add the separator.
+    private func finishWord(separator: String) {
+        guard let proxy else { return }
+        let word = currentWord
+        if autocorrectAllowed, let fix = pendingCorrection, !word.isEmpty, word != skipCorrectionFor {
+            for _ in 0..<word.count { proxy.deleteBackward() }
+            proxy.insertText(fix + separator)
+            lastCorrection = (word, fix, separator)
+        } else {
+            proxy.insertText(separator)
+            lastCorrection = nil
+        }
+        skipCorrectionFor = nil
+    }
+
+    /// Tap a word in the suggestion bar.
+    func pick(_ item: SuggestionItem) {
+        guard let proxy else { return }
+        switch item.role {
+        case .keep:
+            speller.learn(currentWord)
+            proxy.insertText(" ")
+            lastCorrection = nil
+        case .correction, .completion:
+            for _ in 0..<currentWord.count { proxy.deleteBackward() }
+            proxy.insertText(item.text + " ")
+            lastCorrection = nil
+        }
+        skipCorrectionFor = nil
+        clearUndo()
+        if layer != .letters { layer = .letters }
+        afterChange()
+    }
+
+    /// One read of the text before the cursor, then update shift, the current word and suggestions.
+    private func afterChange() {
+        let before = proxy?.documentContextBeforeInput ?? ""
+        updateAutoShift(before)
+
+        var chars: [Character] = []
+        for c in before.reversed() {
+            if c.isLetter || c == "'" || c == "’" { chars.append(c) } else { break }
+        }
+        currentWord = String(chars.reversed())
+
+        var items: [SuggestionItem] = []
+        if autocorrectAllowed, !currentWord.isEmpty {
+            let fix = currentWord == skipCorrectionFor ? nil : speller.correction(for: currentWord)
+            pendingCorrection = fix
+            let others = speller.alternatives(for: currentWord, excluding: fix)
+            if let fix {
+                items = [SuggestionItem(text: "“\(currentWord)”", role: .keep),
+                         SuggestionItem(text: fix, role: .correction)]
+                items += others.prefix(1).map { SuggestionItem(text: $0, role: .completion) }
+            } else {
+                items = others.map { SuggestionItem(text: $0, role: .completion) }
+            }
+        } else {
+            pendingCorrection = nil
+        }
+        if items != suggestions { suggestions = items }
+    }
 
     /// Capitalize the first letter of a message or sentence.
-    private func updateAutoShift() {
+    private func updateAutoShift(_ before: String) {
         guard shift != .locked, layer == .letters else { return }
         guard let proxy, proxy.autocapitalizationType != UITextAutocapitalizationType.none else {
-            if shift != .off { shift = .off }
+            shift = .off
             return
         }
-        let before = proxy.documentContextBeforeInput ?? ""
         let trimmed = before.trimmingCharacters(in: .whitespaces)
         let startOfSentence = trimmed.isEmpty
             || (before.hasSuffix(" ") && ["." as Character, "!", "?"].contains(trimmed.last ?? " "))
             || before.hasSuffix("\n")
-        let wanted: ShiftState = startOfSentence ? .once : .off
-        if shift != wanted { shift = wanted }
+        shift = startOfSentence ? .once : .off
     }
 
     // MARK: Languages & favorites
 
     /// Reload favorites; keep the current choice if it's still a favorite.
     func loadFavorites() {
-        languages = SharedStore.favoriteLanguages
+        let latest = SharedStore.favoriteLanguages
+        if latest != languages { languages = latest }
         if !languages.contains(where: { $0.code == targetCode }), let first = languages.first {
             choose(first)
         }
@@ -256,7 +384,7 @@ final class KeyboardModel: ObservableObject {
         messageTask?.cancel()
         busy = true
         message = ""
-        canUndo = false
+        clearUndo()
         let target = self.target
         task = Task {
             do {
@@ -275,6 +403,7 @@ final class KeyboardModel: ObservableObject {
                 }
             }
             busy = false
+            speller.setLanguage(fromCode: Prefs.lastSource)
         }
     }
 
@@ -291,22 +420,23 @@ final class KeyboardModel: ObservableObject {
         proxy.insertText(translation)
         lastOriginal = original
         lastInserted = translation
+        lastCorrection = nil
         canUndo = true
         flash("Translated to \(targetName). Tap ↩︎ to undo.")
-        updateAutoShift()
+        afterChange()
     }
 
     /// Put the original text back.
     func undo() {
         guard canUndo, let proxy,
               (proxy.documentContextBeforeInput ?? "").hasSuffix(lastInserted) else {
-            canUndo = false
+            clearUndo()
             return
         }
         for _ in 0..<lastInserted.count { proxy.deleteBackward() }
         proxy.insertText(lastOriginal)
         canUndo = false
         flash("Original restored.")
-        updateAutoShift()
+        afterChange()
     }
 }
