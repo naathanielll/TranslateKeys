@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var favorites: [String] = SharedStore.favorites
     @State private var keySounds = SharedStore.keySounds
     @State private var haptics = SharedStore.haptics
+    @State private var autocorrect = SharedStore.autocorrect
 
     var body: some View {
         NavigationStack {
@@ -23,7 +24,7 @@ struct ContentView: View {
                     Text("1. Star the languages you want on the keyboard and tap Download for each.")
                     Text("2. Settings → General → Keyboard → Keyboards → Add New Keyboard → TranslateKeys")
                     Text("3. Tap TranslateKeys there and turn on **Allow Full Access**.")
-                    Text("4. In any app, switch to TranslateKeys with 🌐, type your message, pick a language and tap **Translate**.")
+                    Text("4. In any app, switch to TranslateKeys with 🌐, type your message, pick a language with the button at the top left, and tap **Translate**.")
                     Button("Open Settings") {
                         if let url = URL(string: UIApplication.openSettingsURLString) {
                             UIApplication.shared.open(url)
@@ -58,11 +59,13 @@ struct ContentView: View {
                     if SharedStore.isShared {
                         Text("Starred languages appear on the keyboard. Downloads are free and work offline.")
                     } else {
-                        Text("The keyboard can't read these stars on this install, so pick your languages with the ★ button on the keyboard itself. Downloads are free and work offline.\n\n\(SharedStore.diagnostics)")
+                        Text("The keyboard can't read these stars on this install, so pick your languages on the keyboard itself: tap the language button, then Edit. Downloads are free and work offline.\n\n\(SharedStore.diagnostics)")
                     }
                 }
 
                 Section {
+                    Toggle("Autocorrect", isOn: $autocorrect)
+                        .onChange(of: autocorrect) { _, on in SharedStore.autocorrect = on }
                     Toggle("Key clicks", isOn: $keySounds)
                         .onChange(of: keySounds) { _, on in SharedStore.keySounds = on }
                     Toggle("Haptic feedback", isOn: $haptics)
