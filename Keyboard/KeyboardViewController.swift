@@ -17,7 +17,7 @@ final class KeyboardViewController: UIInputViewController {
         addChild(host)
         view.addSubview(host.view)
 
-        let height = host.view.heightAnchor.constraint(equalToConstant: 270)
+        let height = host.view.heightAnchor.constraint(equalToConstant: 286)
         height.priority = UILayoutPriority(999)
         NSLayoutConstraint.activate([
             host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -33,7 +33,14 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         model.hasFullAccess = hasFullAccess
+        model.loadFavorites()
         model.refresh()
+    }
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+        // Phones with a home button need a 🌐 key on the keyboard; Face ID phones show it below.
+        if model.showGlobe != needsInputModeSwitchKey { model.showGlobe = needsInputModeSwitchKey }
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
@@ -42,33 +49,113 @@ final class KeyboardViewController: UIInputViewController {
     }
 }
 
+enum KeyLayer { case letters, numbers, symbols }
+enum ShiftState { case off, once, locked }
+
 @MainActor
 final class KeyboardModel: ObservableObject {
     @Published var targetCode: String = Prefs.lastTarget
-    @Published var sourcePreview = ""
     @Published var message = ""
     @Published var busy = false
     @Published var canUndo = false
+    @Published var layer: KeyLayer = .letters
+    @Published var shift: ShiftState = .once
+    @Published var showGlobe = false
+    @Published var languages: [TargetLanguage] = SharedStore.favoriteLanguages
     var hasFullAccess = true
 
     var proxyProvider: () -> UITextDocumentProxy? = { nil }
     var nextKeyboard: () -> Void = {}
 
     private var task: Task<Void, Never>?
+    private var messageTask: Task<Void, Never>?
     private var lastOriginal = ""
     private var lastInserted = ""
+    private var lastShiftTap = Date.distantPast
+    private var lastSpaceTap = Date.distantPast
+    private let haptic = UIImpactFeedbackGenerator(style: .light)
 
     var target: TargetLanguage { Languages.find(targetCode) }
+    private var proxy: UITextDocumentProxy? { proxyProvider() }
 
-    /// Selected text if any, otherwise the text before the cursor.
-    private func currentSource() -> (text: String, isSelection: Bool) {
-        guard let proxy = proxyProvider() else { return ("", false) }
-        if let selected = proxy.selectedText, !selected.isEmpty { return (selected, true) }
-        return (proxy.documentContextBeforeInput ?? "", false)
+    // MARK: Typing
+
+    func tap() { haptic.impactOccurred(intensity: 0.6) }
+
+    func type(_ key: String) {
+        let text = (layer == .letters && shift != .off) ? key.uppercased() : key
+        proxy?.insertText(text)
+        canUndo = false
+        // iOS-style: after an apostrophe on the number pad, go back to letters
+        if layer != .letters && key == "'" { layer = .letters }
+        updateAutoShift()
     }
 
-    func refresh() {
-        sourcePreview = currentSource().text.trimmingCharacters(in: .whitespacesAndNewlines)
+    func space() {
+        guard let proxy else { return }
+        let before = proxy.documentContextBeforeInput ?? ""
+        let now = Date()
+        // Double-tap space for ". "
+        if now.timeIntervalSince(lastSpaceTap) < 0.4, before.hasSuffix(" "),
+           let previous = before.dropLast().last, previous.isLetter || previous.isNumber {
+            proxy.deleteBackward()
+            proxy.insertText(". ")
+        } else {
+            proxy.insertText(" ")
+        }
+        lastSpaceTap = now
+        canUndo = false
+        if layer != .letters { layer = .letters }
+        updateAutoShift()
+    }
+
+    func deleteBackward() {
+        proxy?.deleteBackward()
+        canUndo = false
+        updateAutoShift()
+    }
+
+    func newline() {
+        proxy?.insertText("\n")
+        canUndo = false
+        updateAutoShift()
+    }
+
+    func tapShift() {
+        let now = Date()
+        if now.timeIntervalSince(lastShiftTap) < 0.35 {
+            shift = .locked
+        } else {
+            shift = (shift == .off) ? .once : .off
+        }
+        lastShiftTap = now
+    }
+
+    func refresh() { updateAutoShift() }
+
+    /// Capitalize the first letter of a message or sentence.
+    private func updateAutoShift() {
+        guard shift != .locked, layer == .letters else { return }
+        guard let proxy, proxy.autocapitalizationType != UITextAutocapitalizationType.none else {
+            shift = .off
+            return
+        }
+        let before = proxy.documentContextBeforeInput ?? ""
+        let trimmed = before.trimmingCharacters(in: .whitespaces)
+        let startOfSentence = trimmed.isEmpty
+            || (before.hasSuffix(" ") && ["." as Character, "!", "?"].contains(trimmed.last ?? " "))
+            || before.hasSuffix("\n")
+        shift = startOfSentence ? .once : .off
+    }
+
+    // MARK: Languages & messages
+
+    /// Reload the favorites picked in the app; keep the current choice if it's still a favorite.
+    func loadFavorites() {
+        languages = SharedStore.favoriteLanguages
+        if !languages.contains(where: { $0.code == targetCode }), let first = languages.first {
+            choose(first)
+        }
     }
 
     func choose(_ language: TargetLanguage) {
@@ -76,20 +163,40 @@ final class KeyboardModel: ObservableObject {
         Prefs.lastTarget = language.code
     }
 
-    /// Translate the typed (or selected) text and replace it in the message box.
+    private func flash(_ text: String, seconds: Double = 3) {
+        message = text
+        messageTask?.cancel()
+        messageTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if !Task.isCancelled { message = "" }
+        }
+    }
+
+    func dismissMessage() { messageTask?.cancel(); message = "" }
+
+    // MARK: Translate
+
+    /// Selected text if any, otherwise the text before the cursor.
+    private func currentSource() -> (text: String, isSelection: Bool) {
+        guard let proxy else { return ("", false) }
+        if let selected = proxy.selectedText, !selected.isEmpty { return (selected, true) }
+        return (proxy.documentContextBeforeInput ?? "", false)
+    }
+
+    /// Translate what you typed and replace it in the message box.
     func translate() {
         let source = currentSource()
         let original = source.text
         let trimmed = original.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            message = "Type your message with your normal keyboard, then tap 🌐 to switch here."
+            flash("Type your message first, then tap Translate.")
             return
         }
-        // Keep spaces/newlines around the text exactly as they were.
         let leading = String(original.prefix(while: { $0.isWhitespace }))
         let trailing = String(original.reversed().prefix(while: { $0.isWhitespace }).reversed())
 
         task?.cancel()
+        messageTask?.cancel()
         busy = true
         message = ""
         canUndo = false
@@ -105,9 +212,9 @@ final class KeyboardModel: ObservableObject {
                 if !Task.isCancelled {
                     var text = error.localizedDescription
                     if !hasFullAccess {
-                        text += " If this keeps happening, turn on Allow Full Access for TranslateKeys in Settings."
+                        text += " If this keeps happening, turn on Allow Full Access for TranslateKeys."
                     }
-                    message = text
+                    flash(text, seconds: 6)
                 }
             }
             busy = false
@@ -115,12 +222,11 @@ final class KeyboardModel: ObservableObject {
     }
 
     private func apply(_ translation: String, replacing original: String, isSelection: Bool, targetName: String) {
-        guard let proxy = proxyProvider() else { return }
+        guard let proxy else { return }
         let stillSelected = isSelection && (proxy.selectedText ?? "") == original
         if !stillSelected {
-            // Only delete if the text before the cursor is still what we translated.
             guard (proxy.documentContextBeforeInput ?? "").hasSuffix(original) else {
-                message = "The text changed while translating. Tap Translate again."
+                flash("The text changed while translating. Tap Translate again.")
                 return
             }
             for _ in 0..<original.count { proxy.deleteBackward() }
@@ -129,13 +235,13 @@ final class KeyboardModel: ObservableObject {
         lastOriginal = original
         lastInserted = translation
         canUndo = true
-        message = "Translated to \(targetName)."
-        refresh()
+        flash("Translated to \(targetName). Tap ↩︎ to undo.")
+        updateAutoShift()
     }
 
     /// Put the original text back.
     func undo() {
-        guard canUndo, let proxy = proxyProvider(),
+        guard canUndo, let proxy,
               (proxy.documentContextBeforeInput ?? "").hasSuffix(lastInserted) else {
             canUndo = false
             return
@@ -143,11 +249,7 @@ final class KeyboardModel: ObservableObject {
         for _ in 0..<lastInserted.count { proxy.deleteBackward() }
         proxy.insertText(lastOriginal)
         canUndo = false
-        message = "Original restored."
-        refresh()
+        flash("Original restored.")
+        updateAutoShift()
     }
-
-    func deleteBackward() { proxyProvider()?.deleteBackward(); canUndo = false; refresh() }
-    func space() { proxyProvider()?.insertText(" "); canUndo = false; refresh() }
-    func newline() { proxyProvider()?.insertText("\n"); canUndo = false; refresh() }
 }
