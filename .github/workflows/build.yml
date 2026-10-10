@@ -39,9 +39,9 @@ jobs:
           APP="build/Release-iphoneos/TranslateKeys.app"
           APPEX="$APP/PlugIns/TranslateKeysKeyboard.appex"
           test -d "$APPEX" || { echo "Keyboard missing from app"; exit 1; }
-          # Give the keyboard and app a clean basic signature (keyboard first) so Sideloadly re-signs them correctly
-          codesign --force --sign - --timestamp=none "$APPEX"
-          codesign --force --sign - --timestamp=none "$APP"
+          # Basic signature with the shared App Group (keyboard first) so the installer can re-sign it
+          codesign --force --sign - --timestamp=none --entitlements Keyboard/TranslateKeysKeyboard.entitlements "$APPEX"
+          codesign --force --sign - --timestamp=none --entitlements App/TranslateKeys.entitlements "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
           mkdir -p Payload
           cp -R "$APP" Payload/
