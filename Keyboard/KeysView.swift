@@ -51,15 +51,11 @@ final class KeysView: UIView {
         backgroundColor = .clear
         clipsToBounds = false
         popup.isHidden = true
-        model.$layer.dropFirst().receive(on: RunLoop.main)
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.rebuild() } }
-            .store(in: &bag)
-        model.$shift.dropFirst().receive(on: RunLoop.main)
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.updateLabels() } }
-            .store(in: &bag)
-        model.$showGlobe.dropFirst().receive(on: RunLoop.main)
-            .sink { [weak self] _ in DispatchQueue.main.async { self?.rebuild() } }
-            .store(in: &bag)
+        // Typing state talks to the keys directly (not through SwiftUI), so keystrokes stay fast.
+        model.onLayoutChange = { [weak self] in
+            DispatchQueue.main.async { self?.rebuild() }   // after the current touch finishes
+        }
+        model.onShiftChange = { [weak self] in self?.updateLabels() }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
